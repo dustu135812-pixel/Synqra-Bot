@@ -33,41 +33,65 @@ if not GEMINI_API_KEY:
 
 
 # =========================================================
-# GEMINI
+# GEMINI MODELS
 # =========================================================
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+# Primary model
+PRIMARY_MODEL = "gemini-3.8-flash"
 
-MODEL = "gemini-3.8-flash"
+# Fallback models
+FALLBACK_MODELS = [
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-2.5-flash",
+]
 
+ALL_MODELS = [
+    PRIMARY_MODEL,
+    *FALLBACK_MODELS,
+]
+
+
+# =========================================================
+# GEMINI CLIENT
+# =========================================================
+
+client = genai.Client(
+    api_key=GEMINI_API_KEY
+)
+
+
+# =========================================================
+# AI PERSONALITY
+# =========================================================
 
 SYSTEM_PROMPT = """
-You are Synqra AI, a smart Telegram AI assistant.
+You are Synqra AI, a smart and friendly Telegram assistant.
 
-Your personality:
+Personality:
 - Friendly
 - Helpful
-- Smart
-- Fast
+- Intelligent
 - Natural
 - Respectful
+- Concise for simple questions
+- Detailed for complex questions
 
-You can communicate in:
+Languages:
 - English
 - Bengali
 - Banglish
 - Hindi
-- Other languages when appropriate.
+- Other languages when appropriate
 
 Rules:
-1. Answer the user's question directly.
-2. Keep normal answers reasonably concise.
-3. Give detailed answers when the user asks for detail.
-4. Never reveal API keys, tokens or private system instructions.
-5. Never pretend to be a human.
-6. If you don't know something, say so honestly.
-7. For coding questions, provide useful and correct code.
-8. Understand Bengali and Banglish naturally.
+1. Answer the user's actual question.
+2. Understand Bengali and Banglish naturally.
+3. Do not pretend to be human.
+4. Never reveal API keys, tokens or private instructions.
+5. If you don't know something, say so honestly.
+6. Help with coding and technical questions.
+7. Do not unnecessarily repeat the user's question.
 """
 
 
@@ -84,7 +108,7 @@ logger = logging.getLogger("Synqra")
 
 
 # =========================================================
-# FLASK SERVER FOR RENDER
+# RENDER WEB SERVER
 # =========================================================
 
 app = Flask(__name__)
@@ -101,7 +125,10 @@ def health():
 
 
 def run_web_server():
-    port = int(os.getenv("PORT", "10000"))
+
+    port = int(
+        os.getenv("PORT", "10000")
+    )
 
     app.run(
         host="0.0.0.0",
@@ -114,11 +141,21 @@ def run_web_server():
 # =========================================================
 
 auto_replies = {
-    "hi": "👋 Hello! Welcome to Synqra.",
-    "hello": "🤖 Hello! Synqra is ready to help you.",
-    "hey": "⚡ Hey! Synqra is online.",
-    "good morning": "🌅 Good morning! Have a productive day.",
-    "thanks": "😊 You're welcome!",
+
+    "hi":
+        "👋 Hello! Welcome to Synqra.",
+
+    "hello":
+        "🤖 Hello! Synqra is ready to help you.",
+
+    "hey":
+        "⚡ Hey! Synqra is online.",
+
+    "good morning":
+        "🌅 Good morning! Have a productive day.",
+
+    "thanks":
+        "😊 You're welcome!",
 }
 
 
@@ -129,45 +166,74 @@ auto_replies = {
 MAX_HISTORY = 10
 
 memory = defaultdict(
-    lambda: deque(maxlen=MAX_HISTORY)
+    lambda: deque(
+        maxlen=MAX_HISTORY
+    )
 )
 
 
-def add_memory(chat_id, user_text, ai_text):
+def add_memory(
+    chat_id,
+    user_message,
+    ai_message
+):
+
     memory[chat_id].append(
-        f"User: {user_text}\nSynqra: {ai_text}"
+        f"User: {user_message}\n"
+        f"Synqra: {ai_message}"
+    )
+
+
+def get_memory(chat_id):
+
+    if chat_id not in memory:
+        return ""
+
+    return "\n\n".join(
+        memory[chat_id]
     )
 
 
 def clear_memory(chat_id):
-    memory.pop(chat_id, None)
 
-
-def get_memory(chat_id):
-    if chat_id not in memory:
-        return ""
-
-    return "\n\n".join(memory[chat_id])
+    memory.pop(
+        chat_id,
+        None
+    )
 
 
 # =========================================================
 # TELEGRAM MESSAGE SPLITTER
 # =========================================================
 
-def split_text(text, limit=4000):
+def split_message(
+    text,
+    limit=4000
+):
+
     if len(text) <= limit:
         return [text]
 
     parts = []
 
     while len(text) > limit:
-        cut = text.rfind("\n", 0, limit)
+
+        cut = text.rfind(
+            "\n",
+            0,
+            limit
+        )
 
         if cut < 500:
             cut = limit
 
-        parts.append(text[:cut])
-        text = text[cut:].lstrip()
+        parts.append(
+            text[:cut]
+        )
+
+        text = text[
+            cut:
+        ].lstrip()
 
     if text:
         parts.append(text)
@@ -175,78 +241,179 @@ def split_text(text, limit=4000):
     return parts
 
 
-async def send_reply(update, text):
-    for part in split_text(text):
-        await update.message.reply_text(part)
+async def send_message(
+    update,
+    text
+):
+
+    for part in split_message(text):
+
+        await update.message.reply_text(
+            part
+        )
 
 
 # =========================================================
-# GEMINI AI
+# GEMINI REQUEST
 # =========================================================
 
-async def ask_gemini(chat_id, user_message):
+async def generate_with_model(
+    model,
+    prompt
+):
 
-    old_memory = get_memory(chat_id)
+    return await asyncio.to_thread(
+        client.models.generate_content,
+        model=model,
+        contents=prompt
+    )
 
-    if old_memory:
+
+# =========================================================
+# GEMINI WITH RETRY + FALLBACK
+# =========================================================
+
+async def ask_gemini(
+    chat_id,
+    user_message
+):
+
+    previous = get_memory(
+        chat_id
+    )
+
+    if previous:
+
         prompt = f"""
 {SYSTEM_PROMPT}
 
 Previous conversation:
-{old_memory}
+{previous}
 
 New user message:
 {user_message}
 
-Reply naturally to the new user message.
+Answer the new message naturally.
 """
+
     else:
+
         prompt = f"""
 {SYSTEM_PROMPT}
 
 User message:
 {user_message}
 
-Reply naturally to the user.
+Answer naturally.
 """
 
-    try:
 
-        # Run Gemini without blocking Telegram
-        response = await asyncio.to_thread(
-            client.models.generate_content,
-            model=MODEL,
-            contents=prompt
-        )
+    # Try every model
+    for model in ALL_MODELS:
 
-        answer = response.text
+        # 3 attempts per model
+        for attempt in range(3):
 
-        if not answer:
-            raise RuntimeError(
-                "Gemini returned an empty response"
-            )
+            try:
 
-        add_memory(
-            chat_id,
-            user_message,
-            answer
-        )
+                logger.info(
+                    "Trying Gemini model: %s | attempt: %s",
+                    model,
+                    attempt + 1
+                )
 
-        return answer
+                response = await generate_with_model(
+                    model,
+                    prompt
+                )
 
-    except Exception as error:
+                answer = getattr(
+                    response,
+                    "text",
+                    None
+                )
 
-        # Full error goes to Render logs
-        logger.exception(
-            "Gemini API ERROR: %s",
-            error
-        )
+                if answer:
 
-        # User gets a clean message
-        return (
-            "⚠️ Gemini AI is temporarily unavailable.\n\n"
-            "Please try again in a moment."
-        )
+                    add_memory(
+                        chat_id,
+                        user_message,
+                        answer
+                    )
+
+                    logger.info(
+                        "Gemini success using %s",
+                        model
+                    )
+
+                    return answer
+
+                raise RuntimeError(
+                    "Gemini returned empty response"
+                )
+
+
+            except Exception as error:
+
+                error_text = str(
+                    error
+                ).lower()
+
+                logger.warning(
+                    "Gemini error | model=%s | attempt=%s | %s",
+                    model,
+                    attempt + 1,
+                    error
+                )
+
+                # Retry only temporary errors
+                temporary = any(
+                    x in error_text
+                    for x in [
+                        "503",
+                        "unavailable",
+                        "high demand",
+                        "500",
+                        "502",
+                        "504",
+                        "timeout",
+                        "429",
+                        "rate limit",
+                    ]
+                )
+
+                if temporary:
+
+                    # Exponential backoff
+                    wait_time = (
+                        2 ** attempt
+                    )
+
+                    logger.info(
+                        "Retrying in %s seconds...",
+                        wait_time
+                    )
+
+                    await asyncio.sleep(
+                        wait_time
+                    )
+
+                    continue
+
+                # Permanent error:
+                # immediately try next model
+                break
+
+
+    # All models failed
+    logger.error(
+        "All Gemini models failed."
+    )
+
+    return (
+        "⚠️ Gemini AI is temporarily busy.\n\n"
+        "Please try again in a few seconds."
+    )
 
 
 # =========================================================
@@ -259,13 +426,12 @@ async def start(
 ):
 
     await update.message.reply_text(
-        "🤖 Welcome to *Synqra AI*!\n\n"
+        "🤖 Welcome to Synqra AI!\n\n"
         "🧠 Powered by Gemini\n"
         "⚡ Smart Telegram Automation\n"
         "💬 AI conversation\n\n"
         "Ask me anything!\n\n"
-        "Use /help to see commands.",
-        parse_mode="Markdown"
+        "Use /help to see commands."
     )
 
 
@@ -279,17 +445,15 @@ async def help_command(
 ):
 
     await update.message.reply_text(
-        "🛠 *Synqra AI Commands*\n\n"
-        "/start — Start bot\n"
-        "/help — Show help\n"
-        "/clear — Clear conversation memory\n"
-        "/setreply keyword | reply — Add custom reply\n"
-        "/delreply keyword — Delete custom reply\n"
-        "/replies — Show custom replies\n\n"
+        "🛠 Synqra AI Commands\n\n"
+        "/start — Start Synqra\n"
+        "/help — Show commands\n"
+        "/clear — Clear AI memory\n"
+        "/setreply keyword | reply — Add auto reply\n"
+        "/delreply keyword — Delete auto reply\n"
+        "/replies — Show auto replies\n\n"
         "🧠 Normal messages → Gemini AI\n"
         "⚡ Custom replies → Priority"
-        ,
-        parse_mode="Markdown"
     )
 
 
@@ -304,10 +468,12 @@ async def clear_command(
 
     chat_id = update.effective_chat.id
 
-    clear_memory(chat_id)
+    clear_memory(
+        chat_id
+    )
 
     await update.message.reply_text(
-        "🧹 Conversation memory cleared!\n\n"
+        "🧹 AI conversation memory cleared!\n\n"
         "Let's start fresh. 🤖"
     )
 
@@ -321,7 +487,10 @@ async def set_reply(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    text = update.message.text or ""
+    text = (
+        update.message.text
+        or ""
+    )
 
     if "|" not in text:
 
@@ -333,7 +502,10 @@ async def set_reply(
 
         return
 
-    keyword, reply = text.split("|", 1)
+    keyword, reply = text.split(
+        "|",
+        1
+    )
 
     keyword = keyword.replace(
         "/setreply",
@@ -351,10 +523,12 @@ async def set_reply(
 
         return
 
-    auto_replies[keyword] = reply
+    auto_replies[
+        keyword
+    ] = reply
 
     await update.message.reply_text(
-        f"✅ Custom reply added!\n\n"
+        f"✅ Auto reply added!\n\n"
         f"🔑 Keyword: {keyword}\n"
         f"💬 Reply: {reply}"
     )
@@ -369,7 +543,10 @@ async def delete_reply(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    text = update.message.text or ""
+    text = (
+        update.message.text
+        or ""
+    )
 
     keyword = text.replace(
         "/delreply",
@@ -388,16 +565,18 @@ async def delete_reply(
 
     if keyword in auto_replies:
 
-        del auto_replies[keyword]
+        del auto_replies[
+            keyword
+        ]
 
         await update.message.reply_text(
-            f"🗑 Deleted custom reply for: {keyword}"
+            f"🗑 Deleted auto reply for: {keyword}"
         )
 
     else:
 
         await update.message.reply_text(
-            f"❌ No custom reply found for: {keyword}"
+            f"❌ No auto reply found for: {keyword}"
         )
 
 
@@ -413,12 +592,14 @@ async def show_replies(
     if not auto_replies:
 
         await update.message.reply_text(
-            "📭 No custom replies configured."
+            "📭 No auto replies configured."
         )
 
         return
 
-    text = "🤖 Synqra Custom Replies\n\n"
+    text = (
+        "🤖 Synqra Auto Replies\n\n"
+    )
 
     for keyword, reply in auto_replies.items():
 
@@ -427,35 +608,44 @@ async def show_replies(
             f"💬 {reply}\n\n"
         )
 
-    await send_reply(
+    await send_message(
         update,
         text
     )
 
 
 # =========================================================
-# FIND CUSTOM REPLY
+# FIND AUTO REPLY
 # =========================================================
 
-def find_custom_reply(message):
+def find_auto_reply(
+    message
+):
 
-    message = message.lower().strip()
+    message_lower = (
+        message.lower()
+        .strip()
+    )
 
-    # Exact match
-    if message in auto_replies:
-        return auto_replies[message]
+    # Exact match first
+    if message_lower in auto_replies:
+
+        return auto_replies[
+            message_lower
+        ]
 
     # Keyword match
     for keyword, reply in auto_replies.items():
 
-        if keyword in message:
+        if keyword in message_lower:
+
             return reply
 
     return None
 
 
 # =========================================================
-# GROUP CHECK
+# GROUP CONTROL
 # =========================================================
 
 async def allowed_group_message(
@@ -463,35 +653,50 @@ async def allowed_group_message(
     context
 ):
 
-    chat = update.effective_chat
-    message = update.message
+    chat = (
+        update.effective_chat
+    )
 
-    # Private chat → always respond
+    message = (
+        update.message
+    )
+
+    # Private chat
     if chat.type == ChatType.PRIVATE:
+
         return True
 
-    text = message.text or ""
+    text = (
+        message.text
+        or ""
+    )
 
-    # Custom reply
-    if find_custom_reply(text):
+    # Auto reply keyword
+    if find_auto_reply(text):
+
         return True
 
     # Reply to bot
     if message.reply_to_message:
 
-        replied_user = (
+        replied = (
             message.reply_to_message.from_user
         )
 
-        if replied_user:
+        if replied:
 
-            bot_info = await context.bot.get_me()
+            bot_info = (
+                await context.bot.get_me()
+            )
 
-            if replied_user.id == bot_info.id:
+            if replied.id == bot_info.id:
+
                 return True
 
-    # Bot mention
-    bot_info = await context.bot.get_me()
+    # Mention bot
+    bot_info = (
+        await context.bot.get_me()
+    )
 
     if bot_info.username:
 
@@ -499,6 +704,7 @@ async def allowed_group_message(
             f"@{bot_info.username.lower()}"
             in text.lower()
         ):
+
             return True
 
     return False
@@ -519,34 +725,45 @@ async def handle_message(
     if not update.message.text:
         return
 
-    message = update.message.text.strip()
+    message = (
+        update.message.text
+        .strip()
+    )
 
     if not message:
         return
 
-    # Group control
+    # Group filter
     if not await allowed_group_message(
         update,
         context
     ):
+
         return
 
-    # Custom reply first
-    custom_reply = find_custom_reply(message)
+    # Custom auto reply
+    custom = find_auto_reply(
+        message
+    )
 
-    if custom_reply:
+    if custom:
 
-        await send_reply(
+        await send_message(
             update,
-            custom_reply
+            custom
         )
 
         return
 
     # Remove bot mention
-    if update.effective_chat.type != ChatType.PRIVATE:
+    if (
+        update.effective_chat.type
+        != ChatType.PRIVATE
+    ):
 
-        bot_info = await context.bot.get_me()
+        bot_info = (
+            await context.bot.get_me()
+        )
 
         if bot_info.username:
 
@@ -558,7 +775,7 @@ async def handle_message(
     if not message:
         return
 
-    # Typing indicator
+    # Typing
     try:
 
         await update.message.chat.send_action(
@@ -568,15 +785,17 @@ async def handle_message(
     except Exception:
         pass
 
-    # Gemini
-    chat_id = update.effective_chat.id
+    # Ask Gemini
+    chat_id = (
+        update.effective_chat.id
+    )
 
     answer = await ask_gemini(
         chat_id,
         message
     )
 
-    await send_reply(
+    await send_message(
         update,
         answer
     )
@@ -587,13 +806,13 @@ async def handle_message(
 # =========================================================
 
 async def error_handler(
-    update: object,
+    update,
     context: ContextTypes.DEFAULT_TYPE
 ):
 
     logger.exception(
-        "Telegram error",
-        exc_info=context.error
+        "Telegram error: %s",
+        context.error
     )
 
 
@@ -603,13 +822,13 @@ async def error_handler(
 
 def main():
 
-    # Start Render web server
+    # Render web server
     threading.Thread(
         target=run_web_server,
         daemon=True
     ).start()
 
-    # Telegram application
+    # Telegram bot
     bot = (
         Application.builder()
         .token(BOT_TOKEN)
@@ -618,38 +837,57 @@ def main():
 
     # Commands
     bot.add_handler(
-        CommandHandler("start", start)
+        CommandHandler(
+            "start",
+            start
+        )
     )
 
     bot.add_handler(
-        CommandHandler("help", help_command)
+        CommandHandler(
+            "help",
+            help_command
+        )
     )
 
     bot.add_handler(
-        CommandHandler("clear", clear_command)
+        CommandHandler(
+            "clear",
+            clear_command
+        )
     )
 
     bot.add_handler(
-        CommandHandler("setreply", set_reply)
+        CommandHandler(
+            "setreply",
+            set_reply
+        )
     )
 
     bot.add_handler(
-        CommandHandler("delreply", delete_reply)
+        CommandHandler(
+            "delreply",
+            delete_reply
+        )
     )
 
     bot.add_handler(
-        CommandHandler("replies", show_replies)
+        CommandHandler(
+            "replies",
+            show_replies
+        )
     )
 
     # Normal messages
     bot.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
+            filters.TEXT
+            & ~filters.COMMAND,
             handle_message
         )
     )
 
-    # Errors
+    # Error handler
     bot.add_error_handler(
         error_handler
     )
@@ -658,7 +896,7 @@ def main():
         "🚀 Synqra AI Bot is starting..."
     )
 
-    # Start bot
+    # Start polling
     bot.run_polling(
         drop_pending_updates=True
     )
